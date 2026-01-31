@@ -13,7 +13,6 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram.enums import ParseMode
 
 # ========== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ СРЕДЫ ==========
-# Railway автоматически подставит значения
 BOT_TOKEN = os.getenv("BOT_TOKEN", "7998531124:AAFbx5wWIfX47_5vk4iyP5RR-9zs-_rq00Y")
 ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "1336702776")
 ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_STR.split(",")]
@@ -64,6 +63,14 @@ def update_application_status(app_id, status, admin_id=None, admin_name=None):
     conn.commit()
     conn.close()
 
+def delete_application(app_id):
+    conn = sqlite3.connect('applications.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM applications WHERE id = ?', (app_id,))
+    conn.commit()
+    conn.close()
+    return cursor.rowcount > 0
+
 def get_application(app_id):
     conn = sqlite3.connect('applications.db', check_same_thread=False)
     cursor = conn.cursor()
@@ -110,6 +117,42 @@ def get_pending_applications():
         })
     return applications
 
+def get_all_applications(limit=50, offset=0):
+    conn = sqlite3.connect('applications.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM applications ORDER BY id DESC LIMIT ? OFFSET ?', (limit, offset))
+    results = cursor.fetchall()
+    conn.close()
+    applications = []
+    for result in results:
+        applications.append({
+            'id': result[0], 'user_id': result[1], 'username': result[2],
+            'nickname': result[3], 'name': result[4], 'age': result[5],
+            'status': result[6], 'admin_id': result[7], 'admin_name': result[8],
+            'created_at': result[9]
+        })
+    return applications
+
+def search_applications(search_term):
+    conn = sqlite3.connect('applications.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute('''
+    SELECT * FROM applications 
+    WHERE nickname LIKE ? OR name LIKE ? OR username LIKE ?
+    ORDER BY id DESC LIMIT 20
+    ''', (f'%{search_term}%', f'%{search_term}%', f'%{search_term}%'))
+    results = cursor.fetchall()
+    conn.close()
+    applications = []
+    for result in results:
+        applications.append({
+            'id': result[0], 'user_id': result[1], 'username': result[2],
+            'nickname': result[3], 'name': result[4], 'age': result[5],
+            'status': result[6], 'admin_id': result[7], 'admin_name': result[8],
+            'created_at': result[9]
+        })
+    return applications
+
 def get_stats():
     conn = sqlite3.connect('applications.db', check_same_thread=False)
     cursor = conn.cursor()
@@ -139,6 +182,8 @@ def get_admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📋 Новые заявки")],
+            [KeyboardButton(text="📜 История заявок")],
+            [KeyboardButton(text="🔍 Поиск заявки")],
             [KeyboardButton(text="📊 Статистика")]
         ],
         resize_keyboard=True
@@ -150,11 +195,40 @@ def get_cancel_keyboard():
         resize_keyboard=True
     )
 
+def get_back_keyboard():
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="⬅️ Назад")]],
+        resize_keyboard=True
+    )
+
 def get_application_actions(app_id):
     builder = InlineKeyboardBuilder()
     builder.add(InlineKeyboardButton(text="✅ Принять", callback_data=f"approve_{app_id}"))
     builder.add(InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reject_{app_id}"))
     builder.adjust(2)
+    return builder.as_markup()
+
+def get_application_detail_actions(app_id):
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="🗑️ Удалить", callback_data=f"delete_{app_id}"))
+    builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"history_back"))
+    builder.adjust(2)
+    return builder.as_markup()
+
+def get_history_navigation(offset, total_count, limit=10):
+    builder = InlineKeyboardBuilder()
+    
+    if offset > 0:
+        builder.add(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"history_{offset-limit}"))
+    
+    current_page = (offset // limit) + 1
+    total_pages = (total_count + limit - 1) // limit
+    builder.add(InlineKeyboardButton(text=f"{current_page}/{total_pages}", callback_data="page_info"))
+    
+    if offset + limit < total_count:
+        builder.add(InlineKeyboardButton(text="Вперед ➡️", callback_data=f"history_{offset+limit}"))
+    
+    builder.adjust(3)
     return builder.as_markup()
 
 # ========== СОСТОЯНИЯ ==========
@@ -163,6 +237,9 @@ class ApplicationForm(StatesGroup):
     nickname = State()
     name = State()
     age = State()
+
+class SearchForm(StatesGroup):
+    query = State()
 
 # ========== БОТ ==========
 
@@ -184,6 +261,8 @@ async def cmd_admin(message: Message):
         return
     pending = get_pending_applications()
     await message.answer(f"⏳ Ожидают: {len(pending)}", reply_markup=get_admin_keyboard())
+
+# ========== ПОЛЬЗОВАТЕЛЬСКИЕ ФУНКЦИИ ==========
 
 @dp.message(F.text == "📝 Подать заявку")
 async def start_application(message: Message, state: FSMContext):
@@ -252,13 +331,16 @@ async def process_age(message: Message, state: FSMContext):
     
     await message.answer(f"✅ Заявка #{app_id} подана!", reply_markup=get_user_keyboard())
     
-    # Уведомление админам
+    # Уведомление админам с новым текстом
     app_text = f"""
-🆕 *НОВАЯ ЗАЯВКА #{app_id}!*
+🆕 *У тебя новая заявочка, надо бы посмотреть!*
+
+📝 *Заявка #{app_id}!*
 👤 Ник: {data['nickname']}
 📛 Имя: {data['name']}
 🎂 Возраст: {age}
 🆔 ID: {message.from_user.id}
+👤 Username: @{message.from_user.username or 'Нет'}
     """.strip()
     
     for admin_id in ADMIN_IDS:
@@ -280,8 +362,30 @@ async def check_my_application(message: Message):
     if not app:
         await message.answer("📭 Нет заявок", reply_markup=get_user_keyboard())
         return
-    status = {'pending': '⏳', 'approved': '✅', 'rejected': '❌'}.get(app['status'], '❓')
-    await message.answer(f"{status} Заявка #{app['id']}\n👤 {app['nickname']}\n📛 {app['name']}\n🎂 {app['age']}")
+    
+    status_icons = {
+        'pending': '⏳ На рассмотрении',
+        'approved': '✅ Принята',
+        'rejected': '❌ Отклонена'
+    }
+    
+    status_text = status_icons.get(app['status'], '❓ Неизвестно')
+    admin_info = f"\n👑 Рассмотрел: {app['admin_name']}" if app['admin_name'] else ""
+    
+    response = f"""
+{status_text}
+━━━━━━━━━━━━━━━━
+📝 *Заявка #{app['id']}*
+👤 Ник: {app['nickname']}
+📛 Имя: {app['name']}
+🎂 Возраст: {app['age']}
+📅 Дата: {app['created_at'][:16]}
+{admin_info}
+    """.strip()
+    
+    await message.answer(response, parse_mode=ParseMode.MARKDOWN, reply_markup=get_user_keyboard())
+
+# ========== АДМИН-ФУНКЦИИ ==========
 
 @dp.message(F.text == "📋 Новые заявки")
 async def show_new_apps(message: Message):
@@ -291,12 +395,13 @@ async def show_new_apps(message: Message):
     pending = get_pending_applications()
     
     if not pending:
-        await message.answer("✅ Нет заявок", reply_markup=get_admin_keyboard())
+        await message.answer("✅ Нет новых заявок", reply_markup=get_admin_keyboard())
         return
     
     await message.answer(f"📋 Заявок на рассмотрении: {len(pending)}", reply_markup=get_admin_keyboard())
     
-    for app in pending[:3]:
+    # ИСПРАВЛЕН БАГ: отправляем все заявки, а не только первые 3
+    for app in pending:
         try:
             app_text = f"""
 ⏳ *Заявка #{app['id']}*
@@ -304,6 +409,8 @@ async def show_new_apps(message: Message):
 📛 Имя: {app['name']}
 🎂 Возраст: {app['age']}
 🆔 ID: {app['user_id']}
+👤 Username: @{app['username'] or 'Нет'}
+📅 Дата: {app['created_at'][:16]}
             """.strip()
             
             await bot.send_message(
@@ -315,6 +422,92 @@ async def show_new_apps(message: Message):
             
         except Exception as e:
             print(f"Ошибка при отправке заявки: {e}")
+
+@dp.message(F.text == "📜 История заявок")
+async def show_history(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    total, _, _, _ = get_stats()
+    if total == 0:
+        await message.answer("📭 История заявок пуста", reply_markup=get_admin_keyboard())
+        return
+    
+    await show_history_page(message, 0)
+
+async def show_history_page(message: Message, offset=0, limit=10):
+    applications = get_all_applications(limit, offset)
+    total, _, _, _ = get_stats()
+    
+    if not applications:
+        await message.answer("📭 Больше нет заявок", reply_markup=get_admin_keyboard())
+        return
+    
+    status_icons = {
+        'pending': '⏳',
+        'approved': '✅',
+        'rejected': '❌'
+    }
+    
+    response = f"📜 *История заявок*\n━━━━━━━━━━━━━━━━\n"
+    
+    for app in applications:
+        status_icon = status_icons.get(app['status'], '❓')
+        response += f"{status_icon} #{app['id']}: {app['nickname']} ({app['name']}, {app['age']})\n"
+    
+    response += f"\nВсего заявок: {total}"
+    
+    await message.answer(
+        response,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_history_navigation(offset, total, limit)
+    )
+
+@dp.message(F.text == "🔍 Поиск заявки")
+async def start_search(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    await message.answer("🔍 Введите ник, имя или username для поиска:", reply_markup=get_back_keyboard())
+    await state.set_state(SearchForm.query)
+
+@dp.message(SearchForm.query)
+async def process_search(message: Message, state: FSMContext):
+    if message.text == "⬅️ Назад":
+        await state.clear()
+        await message.answer("✅ Поиск отменён", reply_markup=get_admin_keyboard())
+        return
+    
+    search_term = message.text.strip()
+    if len(search_term) < 2:
+        await message.answer("❌ Минимум 2 символа:")
+        return
+    
+    results = search_applications(search_term)
+    
+    if not results:
+        await message.answer(f"🔍 По запросу '{search_term}' ничего не найдено", reply_markup=get_admin_keyboard())
+        await state.clear()
+        return
+    
+    status_icons = {
+        'pending': '⏳',
+        'approved': '✅',
+        'rejected': '❌'
+    }
+    
+    response = f"🔍 *Результаты поиска: '{search_term}'*\n━━━━━━━━━━━━━━━━\n"
+    
+    for app in results[:20]:  # Ограничиваем 20 результатами
+        status_icon = status_icons.get(app['status'], '❓')
+        username = f" @{app['username']}" if app['username'] else ""
+        response += f"{status_icon} #{app['id']}: {app['nickname']} ({app['name']}, {app['age']}){username}\n"
+    
+    if len(results) > 20:
+        response += f"\n... и ещё {len(results) - 20} заявок"
+    
+    await message.answer(response, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_keyboard())
+    await state.clear()
 
 @dp.message(F.text == "📊 Статистика")
 async def show_stats(message: Message):
@@ -336,6 +529,8 @@ async def show_stats(message: Message):
     """.strip()
     
     await message.answer(stats_text, parse_mode=ParseMode.MARKDOWN, reply_markup=get_admin_keyboard())
+
+# ========== CALLBACK ОБРАБОТЧИКИ ==========
 
 @dp.callback_query(F.data.startswith("approve_"))
 async def approve_app(callback: CallbackQuery):
@@ -369,6 +564,91 @@ async def reject_app(callback: CallbackQuery):
     await callback.message.edit_text(f"❌ Заявка #{app_id} отклонена")
     await callback.answer("❌ Отклонено")
 
+@dp.callback_query(F.data.startswith("delete_"))
+async def delete_app(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!")
+        return
+    app_id = int(callback.data.split("_")[1])
+    app = get_application(app_id)
+    
+    if not app:
+        await callback.answer("❌ Заявка не найдена!")
+        return
+    
+    # Запрашиваем подтверждение
+    confirm_text = f"""
+⚠️ *Подтверждение удаления*
+━━━━━━━━━━━━━━━━
+📝 Заявка #{app_id}
+👤 Ник: {app['nickname']}
+📛 Имя: {app['name']}
+🎂 Возраст: {app['age']}
+🆔 ID: {app['user_id']}
+
+❓ Вы уверены, что хотите удалить эту заявку?
+    """.strip()
+    
+    builder = InlineKeyboardBuilder()
+    builder.add(InlineKeyboardButton(text="✅ Да, удалить", callback_data=f"confirm_delete_{app_id}"))
+    builder.add(InlineKeyboardButton(text="❌ Нет, отмена", callback_data="cancel_delete"))
+    builder.adjust(2)
+    
+    await callback.message.edit_text(confirm_text, parse_mode=ParseMode.MARKDOWN, reply_markup=builder.as_markup())
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("confirm_delete_"))
+async def confirm_delete_app(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!")
+        return
+    app_id = int(callback.data.split("_")[2])
+    
+    if delete_application(app_id):
+        await callback.message.edit_text(f"🗑️ Заявка #{app_id} удалена")
+        await callback.answer("✅ Удалено")
+    else:
+        await callback.message.edit_text(f"❌ Ошибка при удалении заявки #{app_id}")
+        await callback.answer("❌ Ошибка")
+
+@dp.callback_query(F.data == "cancel_delete")
+async def cancel_delete(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!")
+        return
+    
+    # Возвращаемся к предыдущему сообщению
+    await callback.message.delete()
+    await callback.answer("❌ Удаление отменено")
+
+@dp.callback_query(F.data.startswith("history_"))
+async def navigate_history(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!")
+        return
+    
+    try:
+        offset = int(callback.data.split("_")[1])
+        await show_history_page(callback.message, offset)
+        await callback.answer()
+    except:
+        await callback.answer("❌ Ошибка навигации")
+
+@dp.callback_query(F.data == "history_back")
+async def history_back(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!")
+        return
+    
+    await callback.message.delete()
+    await show_history(callback.message)
+
+@dp.callback_query(F.data == "page_info")
+async def page_info(callback: CallbackQuery):
+    await callback.answer("Текущая страница")
+
+# ========== ОСНОВНАЯ ФУНКЦИЯ ==========
+
 async def main():
     print("=" * 50)
     print("🤖 БОТ ДЛЯ ЗАЯВОК ЗАПУЩЕН НА RAILWAY")
@@ -388,4 +668,5 @@ async def main():
         print(f"❌ Ошибка: {e}")
 
 if __name__ == "__main__":
+    asyncio.run(main())
     asyncio.run(main())
