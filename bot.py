@@ -15,8 +15,8 @@ from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 
 # ========== НАСТРОЙКИ ИЗ ПЕРЕМЕННЫХ СРЕДЫ ==========
-BOT_TOKEN = os.getenv("BOT_TOKEN", "7998531124:AAFbx5wWIfX47_5vk4iyP5RR-9zs-_rq00Y")
-ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "1336702776")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8457762253:AAEeKghGXJY1gqnJLSctT69Q8tIEBQ21hzk")
+ADMIN_IDS_STR = os.getenv("ADMIN_IDS", "1336702776,6665026304,1860188364")
 ADMIN_IDS = [int(id.strip()) for id in ADMIN_IDS_STR.split(",")]
 
 # Фракции для выбора (без беженцев)
