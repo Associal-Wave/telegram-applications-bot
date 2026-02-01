@@ -1,0 +1,7 @@
+[service]
+concurrency = 1
+min_instances = 1
+max_instances = 1
+
+[build]
+builder = "nixpacks"
