@@ -79,18 +79,13 @@ def init_db():
         )
         ''')
         
-        # Проверяем и добавляем столбец faction если его нет
-        try:
-            cursor.execute("SELECT faction FROM applications LIMIT 1")
-        except sqlite3.OperationalError:
-            print("🔄 Добавляем столбец faction в таблицу...")
-            cursor.execute('ALTER TABLE applications ADD COLUMN faction TEXT DEFAULT "techno"')
-        
         conn.commit()
         conn.close()
         print("✅ База данных инициализирована")
+        return True
     except Exception as e:
         print(f"❌ Ошибка инициализации БД: {e}")
+        return False
 
 # ========== ФУНКЦИИ ДЛЯ ЗАЯВОК ==========
 
@@ -616,10 +611,7 @@ async def cmd_start(message: Message):
     logger.info(f"👤 Пользователь {user_id} (@{username}) нажал /start")
     
     # Инициализируем БД
-    try:
-        init_db()
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации БД: {e}")
+    init_db()
     
     # Отправляем приветственное сообщение
     await message.answer(WELCOME_MESSAGE)
@@ -640,6 +632,21 @@ async def cmd_start(message: Message):
             "<i>Выберите действие в меню ниже:</i>",
             reply_markup=get_user_keyboard()
         )
+
+@dp.message(Command("restart"))
+async def cmd_restart(message: Message):
+    """Команда для принудительного перезапуска бота (только для админов)"""
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    await message.answer("🔄 <b>Перезапуск системы...</b>")
+    
+    # Останавливаем polling
+    dp.stop_polling()
+    await asyncio.sleep(2)
+    
+    # Перезапускаем бота
+    await message.answer("✅ <b>Система перезапущена</b>\nИспользуйте /start")
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: Message):
@@ -1298,49 +1305,705 @@ async def complaints_back(callback: CallbackQuery):
     await callback.message.delete()
     await show_complaints_menu(callback.message)
 
-# ========== ЗАЯВКИ С ТЕМАТИЧЕСКИМИ СООБЩЕНИЯМИ ==========
+# ========== ФУНКЦИИ ДЛЯ ЗАЯВОК ==========
 
-# (Весь код для заявок, истории, поиска, статистики и обработки заявок остаётся таким же,
-# только добавлены новые пункты в админ-меню)
+@dp.message(F.text == "📝 Подать заявку")
+async def start_application(message: Message, state: FSMContext):
+    user_id = message.from_user.id
+    
+    # Проверяем, есть ли уже активная заявка
+    last_app = get_user_last_application(user_id)
+    if last_app and last_app['status'] == 'pending':
+        await message.answer(
+            "⏳ <b>У вас уже есть активная заявка!</b>\n"
+            f"#{last_app['id']} - {last_app['nickname']} ({last_app['age']} л.)\n\n"
+            "Дождитесь решения по текущей заявке.",
+            reply_markup=get_user_keyboard()
+        )
+        return
+    
+    logger.info(f"👤 Пользователь {user_id} начал оформление заявки")
+    
+    await message.answer(
+        "📝 <b>СОЗДАНИЕ ЗАЯВКИ</b>\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "✏️ <b>Введите ваш никнейм в игре:</b>\n\n"
+        "<i>Только буквы, цифры и символы (3-20 символов)</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(ApplicationForm.nickname)
 
-# ... [Здесь весь остальной код для заявок, такой же как в предыдущем варианте] ...
+@dp.message(ApplicationForm.nickname)
+async def process_nickname(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("✅ Отменено", reply_markup=get_user_keyboard())
+        return
+    
+    nickname = message.text.strip()
+    if len(nickname) < 3 or len(nickname) > 20:
+        await message.answer("❌ <b>Некорректный никнейм!</b>\nВведите никнейм (3-20 символов):")
+        return
+    
+    await state.update_data(nickname=nickname)
+    await message.answer(
+        "👤 <b>Введите ваше настоящее имя:</b>\n\n"
+        "<i>Имя, которое будет использоваться в документах</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(ApplicationForm.name)
 
-# ========== ОСНОВНАЯ ФУНКЦИЯ ==========
+@dp.message(ApplicationForm.name)
+async def process_name(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("✅ Отменено", reply_markup=get_user_keyboard())
+        return
+    
+    name = message.text.strip()
+    if len(name) < 2 or len(name) > 30:
+        await message.answer("❌ <b>Некорректное имя!</b>\nВведите ваше имя (2-30 символов):")
+        return
+    
+    await state.update_data(name=name)
+    await message.answer(
+        "🎂 <b>Введите ваш возраст:</b>\n\n"
+        "<i>Только цифры (от 14 до 99 лет)</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(ApplicationForm.age)
+
+@dp.message(ApplicationForm.age)
+async def process_age(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("✅ Отменено", reply_markup=get_user_keyboard())
+        return
+    
+    try:
+        age = int(message.text.strip())
+        if age < 14 or age > 99:
+            await message.answer("❌ <b>Некорректный возраст!</b>\nВведите возраст от 14 до 99 лет:")
+            return
+    except ValueError:
+        await message.answer("❌ <b>Некорректный возраст!</b>\nВведите число:")
+        return
+    
+    await state.update_data(age=age)
+    await message.answer(
+        "🎮 <b>Выберите фракцию:</b>\n\n"
+        "<i>Этот выбор определит вашу сторону в конфликте</i>",
+        reply_markup=get_faction_keyboard()
+    )
+    await state.set_state(ApplicationForm.faction)
+
+@dp.message(ApplicationForm.faction)
+async def process_faction(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("✅ Отменено", reply_markup=get_user_keyboard())
+        return
+    
+    # Находим ключ фракции по тексту
+    faction_key = None
+    for key, value in FACTIONS.items():
+        if message.text == value:
+            faction_key = key
+            break
+    
+    if faction_key is None:
+        await message.answer("❌ <b>Пожалуйста, выберите фракцию из предложенных:</b>", reply_markup=get_faction_keyboard())
+        return
+    
+    data = await state.get_data()
+    
+    # Добавляем заявку в БД
+    user_id = message.from_user.id
+    username = message.from_user.username
+    app_id = add_application(
+        user_id=user_id,
+        username=username,
+        nickname=data['nickname'],
+        name=data['name'],
+        age=data['age'],
+        faction=faction_key
+    )
+    
+    if not app_id:
+        await message.answer(
+            "❌ <b>Произошла ошибка при сохранении заявки!</b>\n"
+            "Попробуйте ещё раз или обратитесь к администратору.",
+            reply_markup=get_user_keyboard()
+        )
+        await state.clear()
+        return
+    
+    await message.answer(
+        f"✅ <b>ЗАЯВКА #{app_id} СОЗДАНА!</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🏷️ <b>Никнейм:</b> {data['nickname']}\n"
+        f"👤 <b>Имя:</b> {data['name']}\n"
+        f"🎂 <b>Возраст:</b> {data['age']}\n"
+        f"🎮 <b>Фракция:</b> {FACTIONS[faction_key]}\n\n"
+        f"⏳ <b>Заявка отправлена на рассмотрение.</b>\n"
+        f"Вы получите уведомление, когда администратор её рассмотрит.",
+        reply_markup=get_user_keyboard()
+    )
+    
+    logger.info(f"✅ Заявка #{app_id} создана пользователем {user_id}")
+    await state.clear()
+
+@dp.message(F.text == "📊 Моя заявка")
+async def show_my_application(message: Message):
+    user_id = message.from_user.id
+    application = get_user_last_application(user_id)
+    
+    if not application:
+        await message.answer(
+            "📊 <b>У вас нет заявок</b>\n\n"
+            "Нажмите <b>📝 Подать заявку</b> чтобы создать первую заявку!",
+            reply_markup=get_user_keyboard()
+        )
+        return
+    
+    status_icons = {
+        'pending': '⏳',
+        'approved': '✅',
+        'rejected': '❌'
+    }
+    
+    status_texts = {
+        'pending': 'Ожидает рассмотрения',
+        'approved': 'Принята',
+        'rejected': 'Отклонена'
+    }
+    
+    faction_name = FACTIONS.get(application['faction'], "Неизвестно")
+    status_icon = status_icons.get(application['status'], '❓')
+    status_text = status_texts.get(application['status'], application['status'])
+    
+    response = (
+        f"📊 <b>ВАША ЗАЯВКА</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🆔 <b>Номер:</b> #{application['id']}\n"
+        f"{status_icon} <b>Статус:</b> {status_text}\n"
+        f"🏷️ <b>Никнейм:</b> {application['nickname']}\n"
+        f"👤 <b>Имя:</b> {application['name']}\n"
+        f"🎂 <b>Возраст:</b> {application['age']}\n"
+        f"🎮 <b>Фракция:</b> {faction_name}\n"
+        f"📅 <b>Дата подачи:</b> {application['created_at'][:16]}\n"
+    )
+    
+    if application['status'] == 'approved' and application['admin_name']:
+        response += f"👑 <b>Принял:</b> {application['admin_name']}\n"
+    elif application['status'] == 'rejected' and application['admin_name']:
+        response += f"👑 <b>Отклонил:</b> {application['admin_name']}\n"
+    
+    response += f"━━━━━━━━━━━━━━━━"
+    
+    await message.answer(response, reply_markup=get_user_keyboard())
+
+# ========== АДМИН-ФУНКЦИИ ДЛЯ ЗАЯВОК ==========
+
+@dp.message(F.text == "📋 Новые заявки")
+async def show_new_applications(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    pending_apps = get_pending_applications()
+    
+    if not pending_apps:
+        await message.answer(
+            "✅ <b>Нет новых заявок!</b>\n"
+            "Все заявки рассмотрены.",
+            reply_markup=get_admin_keyboard()
+        )
+        return
+    
+    await message.answer(
+        f"📋 <b>НОВЫЕ ЗАЯВКИ</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"⏳ <b>Ожидают рассмотрения:</b> {len(pending_apps)}\n"
+        f"━━━━━━━━━━━━━━━━",
+        reply_markup=get_admin_keyboard()
+    )
+    
+    # Показываем каждую заявку с кнопками
+    for app in pending_apps[:5]:  # Показываем первые 5
+        try:
+            faction_name = FACTIONS.get(app['faction'], "Неизвестно")
+            application_text = (
+                f"📝 <b>Заявка #{app['id']}</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🏷️ <b>Никнейм:</b> {app['nickname']}\n"
+                f"👤 <b>Имя:</b> {app['name']}\n"
+                f"🎂 <b>Возраст:</b> {app['age']}\n"
+                f"🎮 <b>Фракция:</b> {faction_name}\n"
+                f"👤 <b>Username:</b> @{app['username'] if app['username'] else 'нет'}\n"
+                f"🆔 <b>ID пользователя:</b> {app['user_id']}\n"
+                f"📅 <b>Дата подачи:</b> {app['created_at'][:16]}\n"
+                f"━━━━━━━━━━━━━━━━"
+            )
+            
+            await bot.send_message(
+                chat_id=message.chat.id,
+                text=application_text,
+                reply_markup=get_application_actions(app['id'])
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки заявки #{app['id']}: {e}")
+
+@dp.callback_query(F.data.startswith("approve_"))
+async def approve_application(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+    
+    try:
+        app_id = int(callback.data.split("_")[1])
+        application = get_application(app_id)
+        
+        if not application:
+            await callback.answer("❌ Заявка не найдена!", show_alert=True)
+            return
+        
+        if application['status'] != 'pending':
+            await callback.answer(f"❌ Заявка уже рассмотрена! Статус: {application['status']}", show_alert=True)
+            return
+        
+        # Обновляем статус заявки
+        success = update_application_status(
+            app_id, 
+            'approved', 
+            callback.from_user.id, 
+            callback.from_user.first_name
+        )
+        
+        if not success:
+            await callback.answer("❌ Ошибка при обновлении статуса!", show_alert=True)
+            return
+        
+        # Отправляем уведомление пользователю
+        try:
+            await bot.send_message(
+                application['user_id'],
+                f"✅ <b>ВАША ЗАЯВКА #{app_id} ПРИНЯТА!</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🏷️ <b>Никнейм:</b> {application['nickname']}\n"
+                f"👤 <b>Имя:</b> {application['name']}\n"
+                f"🎮 <b>Фракция:</b> {FACTIONS.get(application['faction'], 'Неизвестно')}\n\n"
+                f"👑 <b>Администратор:</b> {callback.from_user.first_name}\n"
+                f"🎉 <b>Добро пожаловать в игру!</b>"
+            )
+            logger.info(f"✅ Уведомление отправлено пользователю {application['user_id']} о принятии заявки #{app_id}")
+        except Exception as e:
+            logger.error(f"❌ Не удалось отправить уведомление пользователю {application['user_id']}: {e}")
+        
+        await callback.message.edit_text(
+            f"✅ <b>Заявка #{app_id} принята!</b>\n"
+            f"Пользователь уведомлён.",
+            reply_markup=None
+        )
+        
+        await callback.answer(f"✅ Заявка #{app_id} принята")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка принятия заявки: {e}")
+        await callback.answer("❌ Произошла ошибка!", show_alert=True)
+
+@dp.callback_query(F.data.startswith("reject_"))
+async def reject_application(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+    
+    try:
+        app_id = int(callback.data.split("_")[1])
+        application = get_application(app_id)
+        
+        if not application:
+            await callback.answer("❌ Заявка не найдена!", show_alert=True)
+            return
+        
+        if application['status'] != 'pending':
+            await callback.answer(f"❌ Заявка уже рассмотрена! Статус: {application['status']}", show_alert=True)
+            return
+        
+        # Обновляем статус заявки
+        success = update_application_status(
+            app_id, 
+            'rejected', 
+            callback.from_user.id, 
+            callback.from_user.first_name
+        )
+        
+        if not success:
+            await callback.answer("❌ Ошибка при обновлении статуса!", show_alert=True)
+            return
+        
+        # Отправляем уведомление пользователю
+        try:
+            await bot.send_message(
+                application['user_id'],
+                f"❌ <b>ВАША ЗАЯВКА #{app_id} ОТКЛОНЕНА</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🏷️ <b>Никнейм:</b> {application['nickname']}\n"
+                f"👤 <b>Имя:</b> {application['name']}\n"
+                f"🎮 <b>Фракция:</b> {FACTIONS.get(application['faction'], 'Неизвестно')}\n\n"
+                f"👑 <b>Администратор:</b> {callback.from_user.first_name}\n"
+                f"<i>Заявка была отклонена. Вы можете подать новую заявку.</i>"
+            )
+            logger.info(f"✅ Уведомление отправлено пользователю {application['user_id']} об отклонении заявки #{app_id}")
+        except Exception as e:
+            logger.error(f"❌ Не удалось отправить уведомление пользователю {application['user_id']}: {e}")
+        
+        await callback.message.edit_text(
+            f"❌ <b>Заявка #{app_id} отклонена</b>\n"
+            f"Пользователь уведомлён.",
+            reply_markup=None
+        )
+        
+        await callback.answer(f"❌ Заявка #{app_id} отклонена")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка отклонения заявки: {e}")
+        await callback.answer("❌ Произошла ошибка!", show_alert=True)
+
+@dp.message(F.text == "📜 История заявок")
+async def show_applications_history(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    total, pending, approved, rejected = get_stats()
+    
+    await message.answer(
+        f"📜 <b>ИСТОРИЯ ЗАЯВОК</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>Статистика:</b>\n"
+        f"📋 Всего: {total}\n"
+        f"⏳ Ожидают: {pending}\n"
+        f"✅ Приняты: {approved}\n"
+        f"❌ Отклонены: {rejected}\n\n"
+        f"<i>Загружаю последние заявки...</i>",
+        reply_markup=get_admin_keyboard()
+    )
+    
+    await show_history_page(message, 0)
+
+async def show_history_page(message: Message, offset=0, limit=10):
+    applications = get_all_applications(limit, offset)
+    total, _, _, _ = get_stats()
+    
+    if not applications:
+        await message.answer("📜 <b>Заявок пока нет</b>", reply_markup=get_admin_keyboard())
+        return
+    
+    response = "📜 <b>ПОСЛЕДНИЕ ЗАЯВКИ</b>\n━━━━━━━━━━━━━━━━\n"
+    
+    for app in applications:
+        status_icons = {
+            'pending': '⏳',
+            'approved': '✅',
+            'rejected': '❌'
+        }
+        status_icon = status_icons.get(app['status'], '❓')
+        faction_icon = FACTIONS.get(app['faction'], '🎮').split()[0]
+        
+        response += f"{status_icon}{faction_icon} <b>#{app['id']}</b>: {app['nickname']} ({app['age']} л.)\n"
+    
+    response += f"\n<b>Всего заявок:</b> {total}"
+    
+    await bot.send_message(
+        chat_id=message.chat.id,
+        text=response,
+        reply_markup=get_history_navigation(offset, total, limit, "history")
+    )
+    
+    # Подробная информация по каждой заявке
+    for app in applications[:3]:
+        try:
+            status_icons = {
+                'pending': '⏳ Ожидает',
+                'approved': '✅ Принята',
+                'rejected': '❌ Отклонена'
+            }
+            status_text = status_icons.get(app['status'], app['status'])
+            faction_name = FACTIONS.get(app['faction'], "Неизвестно")
+            
+            app_info = (
+                f"📝 <b>Заявка #{app['id']}</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"{status_text}\n"
+                f"🏷️ <b>Ник:</b> {app['nickname']}\n"
+                f"📛 <b>Имя:</b> {app['name']}\n"
+                f"🎂 <b>Возраст:</b> {app['age']}\n"
+                f"🎮 <b>Фракция:</b> {faction_name}\n"
+                f"👤 <b>Username:</b> @{app['username'] if app['username'] else 'нет'}\n"
+                f"🆔 <b>ID:</b> {app['user_id']}\n"
+                f"📅 <b>Дата:</b> {app['created_at'][:16]}\n"
+                f"━━━━━━━━━━━━━━━━"
+            )
+            
+            if app['admin_name']:
+                app_info += f"\n👑 <b>Админ:</b> {app['admin_name']}"
+            
+            await bot.send_message(
+                chat_id=message.chat.id,
+                text=app_info,
+                reply_markup=get_application_actions(app['id']) if app['status'] == 'pending' else None
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки информации о заявке #{app['id']}: {e}")
+
+@dp.callback_query(F.data.startswith("history_"))
+async def navigate_history(callback: CallbackQuery):
+    if callback.from_user.id not in ADMIN_IDS:
+        await callback.answer("❌ Нет доступа!", show_alert=True)
+        return
+    
+    try:
+        offset = int(callback.data.split("_")[1])
+        await callback.message.delete()
+        await show_history_page(callback.message, offset)
+        await callback.answer()
+    except Exception as e:
+        logger.error(f"❌ Ошибка навигации по истории: {e}")
+        await callback.answer("❌ Ошибка навигации!", show_alert=True)
+
+@dp.message(F.text == "🔍 Поиск заявки")
+async def start_search(message: Message, state: FSMContext):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    await message.answer(
+        "🔍 <b>ПОИСК ЗАЯВКИ</b>\n"
+        "━━━━━━━━━━━━━━━━\n"
+        "Введите для поиска:\n"
+        "• Никнейм игрока\n"
+        "• Имя игрока\n"
+        "• Username (без @)\n"
+        "• Фракцию\n\n"
+        "<i>Минимум 2 символа</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(SearchForm.query)
+
+@dp.message(SearchForm.query)
+async def process_search(message: Message, state: FSMContext):
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("✅ Отменено", reply_markup=get_admin_keyboard())
+        return
+    
+    search_term = message.text.strip()
+    if len(search_term) < 2:
+        await message.answer("❌ <b>Минимум 2 символа!</b>\nВведите поисковый запрос:")
+        return
+    
+    results = search_applications(search_term)
+    
+    if not results:
+        await message.answer(
+            f"🔍 <b>По запросу '{search_term}' ничего не найдено</b>",
+            reply_markup=get_admin_keyboard()
+        )
+        await state.clear()
+        return
+    
+    await message.answer(
+        f"🔍 <b>РЕЗУЛЬТАТЫ ПОИСКА</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>Найдено:</b> {len(results)} заявок\n"
+        f"🔎 <b>Запрос:</b> {search_term}\n"
+        f"━━━━━━━━━━━━━━━━",
+        reply_markup=get_admin_keyboard()
+    )
+    
+    for app in results[:10]:  # Показываем первые 10 результатов
+        try:
+            status_icons = {
+                'pending': '⏳',
+                'approved': '✅',
+                'rejected': '❌'
+            }
+            status_icon = status_icons.get(app['status'], '❓')
+            faction_name = FACTIONS.get(app['faction'], "Неизвестно")
+            
+            app_info = (
+                f"{status_icon} <b>Заявка #{app['id']}</b>\n"
+                f"━━━━━━━━━━━━━━━━\n"
+                f"🏷️ <b>Ник:</b> {app['nickname']}\n"
+                f"📛 <b>Имя:</b> {app['name']}\n"
+                f"🎂 <b>Возраст:</b> {app['age']}\n"
+                f"🎮 <b>Фракция:</b> {faction_name}\n"
+                f"👤 <b>Username:</b> @{app['username'] if app['username'] else 'нет'}\n"
+                f"📅 <b>Дата:</b> {app['created_at'][:16]}\n"
+                f"━━━━━━━━━━━━━━━━"
+            )
+            
+            await bot.send_message(
+                chat_id=message.chat.id,
+                text=app_info,
+                reply_markup=get_application_actions(app['id']) if app['status'] == 'pending' else None
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки результата поиска #{app['id']}: {e}")
+    
+    await state.clear()
+
+@dp.message(F.text == "📊 Статистика")
+async def show_stats(message: Message):
+    if message.from_user.id not in ADMIN_IDS:
+        return
+    
+    total_apps, pending_apps, approved_apps, rejected_apps = get_stats()
+    total_complaints, pending_complaints, reviewing_complaints, resolved_complaints = get_complaints_stats()
+    player_count = get_player_count()
+    
+    # Получаем количество по фракциям
+    try:
+        conn = sqlite3.connect('applications.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM applications WHERE faction = 'techno' AND status = 'approved'")
+        techno_count = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT COUNT(*) FROM applications WHERE faction = 'mages' AND status = 'approved'")
+        mages_count = cursor.fetchone()[0] or 0
+        
+        # Активность за последние 7 дней
+        cursor.execute("SELECT COUNT(*) FROM applications WHERE created_at >= datetime('now', '-7 days')")
+        apps_last_week = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT COUNT(*) FROM applications WHERE status = 'approved' AND created_at >= datetime('now', '-7 days')")
+        approved_last_week = cursor.fetchone()[0] or 0
+        
+        conn.close()
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения статистики фракций: {e}")
+        techno_count, mages_count, apps_last_week, approved_last_week = 0, 0, 0, 0
+    
+    stats_text = (
+        f"📊 <b>СТАТИСТИКА СИСТЕМЫ</b>\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📋 <b>ЗАЯВКИ:</b>\n"
+        f"• 📋 Всего: {total_apps}\n"
+        f"• ⏳ Ожидают: {pending_apps}\n"
+        f"• ✅ Приняты: {approved_apps}\n"
+        f"• ❌ Отклонены: {rejected_apps}\n\n"
+        f"👥 <b>ИГРОКИ:</b>\n"
+        f"• 👥 Всего: {player_count}\n"
+        f"• ⚙️ Техно-Братство: {techno_count}\n"
+        f"• 🔮 Орден Магов: {mages_count}\n\n"
+        f"📖 <b>ЖАЛОБЫ:</b>\n"
+        f"• 📋 Всего: {total_complaints}\n"
+        f"• ⏳ Ожидают: {pending_complaints}\n"
+        f"• 👁️ На рассмотрении: {reviewing_complaints}\n"
+        f"• ✅ Решено: {resolved_complaints}\n\n"
+        f"📅 <b>АКТИВНОСТЬ:</b>\n"
+        f"• 📝 Заявок за неделю: {apps_last_week}\n"
+        f"• ✅ Принято за неделю: {approved_last_week}\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"🔄 <b>Последнее обновление:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    )
+    
+    await message.answer(stats_text, reply_markup=get_admin_keyboard())
+
+# ========== ОСНОВНАЯ ФУНКЦИЯ С УЛУЧШЕННОЙ ОБРАБОТКОЙ КОНФЛИКТОВ ==========
 
 async def main():
     print("=" * 60)
-    print("🤖 СИСТЕМА ИДЕНТИФИКАЦИИ ЗАПУЩЕНА")
+    print("🤖 СИСТЕМА ИДЕНТИФИКАЦИИ ЗАПУСКАЕТСЯ")
     print("=" * 60)
     print(f"🔑 Токен системы: {BOT_TOKEN[:10]}...")
     print(f"👑 Администраторов: {len(ADMIN_IDS)}")
     print(f"🆔 ID админов: {ADMIN_IDS}")
-    print(f"🎮 Доступные фракции: {len(FACTIONS)} ({', '.join(FACTIONS.values())})")
     print(f"📅 Время запуска: {datetime.now().strftime('%d.%m.%Y %H:%M:%S')}")
-    print("🚀 Система активирована...")
     print("-" * 60)
     
     # Инициализируем БД
-    init_db()
+    if not init_db():
+        print("❌ КРИТИЧЕСКАЯ ОШИБКА: Не удалось инициализировать БД!")
+        return
     
-    try:
-        # Удаляем вебхук (чтобы избежать конфликта)
-        await bot.delete_webhook(drop_pending_updates=True)
-        print("✅ Вебхук удалён")
-        
-        # Запускаем polling
-        print("📡 Начинаем сканирование сигналов...")
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
-        
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка системы: {e}")
-    finally:
-        await bot.session.close()
+    max_retries = 5
+    retry_delay = 5
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"🔄 Попытка {attempt + 1}/{max_retries}")
+            
+            # ОБЯЗАТЕЛЬНО удаляем вебхук перед запуском
+            await bot.delete_webhook(drop_pending_updates=True)
+            print("✅ Вебхук удалён")
+            
+            # Ждём немного
+            await asyncio.sleep(2)
+            
+            # Запускаем polling с явным указанием allowed_updates
+            print("📡 Начинаем сканирование сигналов...")
+            await dp.start_polling(
+                bot, 
+                skip_updates=True,  # Пропускаем накопившиеся обновления
+                allowed_updates=dp.resolve_used_update_types(),
+                timeout=30,
+                relax=1
+            )
+            
+            # Если дошли сюда - polling успешно запущен
+            break
+            
+        except Exception as e:
+            error_msg = str(e)
+            print(f"❌ Ошибка при запуске (попытка {attempt + 1}): {error_msg}")
+            
+            if "Conflict" in error_msg:
+                print("⚠️ Обнаружен конфликт! Возможно, бот уже запущен где-то ещё.")
+                print("🔄 Ждём 10 секунд и пробуем снова...")
+                await asyncio.sleep(10)
+                
+                # Пробуем снова удалить вебхук
+                try:
+                    await bot.delete_webhook(drop_pending_updates=True)
+                    print("✅ Вебхук переудалён")
+                except:
+                    pass
+                    
+            elif attempt < max_retries - 1:
+                print(f"⏳ Ждём {retry_delay} секунд перед следующей попыткой...")
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2  # Экспоненциальная задержка
+            else:
+                print("❌ Превышено максимальное количество попыток. Бот остановлен.")
+                raise
+    
+    print("\n👋 Система остановлена")
 
 if __name__ == "__main__":
-    # Запускаем систему
     try:
+        # Добавляем дополнительную проверку на множественные запуски
+        import socket
+        try:
+            # Пробуем занять порт (простая проверка на множественный запуск)
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.bind(('localhost', 12345))  # Произвольный порт для проверки
+            sock.close()
+            print("✅ Проверка на множественный запуск пройдена")
+        except socket.error:
+            print("⚠️ ВНИМАНИЕ: Возможно, бот уже запущен!")
+            print("Закройте все другие экземпляры бота перед запуском.")
+        
+        # Запускаем бота
         asyncio.run(main())
+        
     except KeyboardInterrupt:
-        print("\n👋 Система остановлена пользователем")
+        print("\n👋 Система остановлена пользователем (Ctrl+C)")
     except Exception as e:
-        print(f"❌ Непредвиденная ошибка системы: {e}")
+        print(f"\n❌ Непредвиденная ошибка системы: {e}")
+        import traceback
+        traceback.print_exc()
+    finally:
+        print("✅ Сессия бота закрыта")
